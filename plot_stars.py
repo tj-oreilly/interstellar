@@ -48,12 +48,15 @@ def main():
     if stars is None:
         return
 
+    stars = stars[stars["distance_ly"] < 25.0]  # Filter by distance
+
     # Scale up the points so they fill the screen
     max_dist = np.max(stars["distance_ly"])
     scale = SIZE / (2 * max_dist)
 
     # Draw
     CENTER = np.array([SIZE / 2, SIZE / 2])
+
     for i, star in stars.iterrows():
         pygame.draw.circle(
             screen,
@@ -61,6 +64,8 @@ def main():
             CENTER + scale * np.array([star["x"], star["y"]]),
             2.0,
         )
+
+    pygame.draw.circle(screen, [255, 0, 0], CENTER, 5.0)  # Draw sun
 
     pygame.display.flip()
 
