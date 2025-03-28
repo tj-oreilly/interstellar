@@ -13,7 +13,7 @@ RADIUS_OF_STARS = 1e-4  # pc
 SPACE_SIZE = 10  # pc
 MIN_STEP = 5e-9
 MAX_STEP = 5e-9
-N_STOPS = 5
+N_STOPS = 6
 V_STAR = 7e-12  # pc/s
 PROBE_MASS = 478  # kg
 
@@ -53,23 +53,6 @@ def compute_distances_between_objects(x1, y1, x2, y2):
     return sqrt((x2 - x1)**2 + (y2 - y1)**2)
 
 
-def path_intersects_any_star(x1, y1, x2, y2, star_index):
-    for i, (sx, sy) in stars.iterrows():
-        if i == star_index or (sx == x1 and sy == y1) or (sx == x2 and sy == y2):
-            continue
-        dx = x2 - x1
-        dy = y2 - y1
-        if dx == 0 and dy == 0:
-            continue
-        t = ((sx - x1) * dx + (sy - y1) * dy) / (dx**2 + dy**2)
-        t = max(0, min(1, t))
-        closest_x = x1 + t * dx
-        closest_y = y1 + t * dy
-        if compute_distances_between_objects(sx, sy, closest_x, closest_y) < RADIUS_OF_STARS:
-            return True
-    return False
-
-
 #//////PATHFINDING_PART///////////PATHFINDING_PART///////////PATHFINDING_PART///////////PATHFINDING_PART///////////PATHFINDING_PART/////
 
 
@@ -79,8 +62,6 @@ def stars_separation():
         distances[i] = []
         for j, (x2, y2) in stars.iterrows():
             if i != j:
-                if path_intersects_any_star(x1, y1, x2, y2, i):
-                    continue
                 dist = compute_distances_between_objects(x1, y1, x2, y2)
                 travel_time = dist / STEP_SIZE
                 distances[i].append((travel_time, dist, j))
@@ -250,7 +231,7 @@ def create_space(step_size):
     ax.legend()
     ax.set_xlim(0, SPACE_SIZE)
     ax.set_ylim(0, SPACE_SIZE)
-    plt.savefig(f"Diagrams/Simulation_PF_STEP_SIZE={STEP_SIZE}.png")
+    plt.savefig(f"Diagrams/Pathfinding_diagrams/Simulation_PF_STEP_SIZE={STEP_SIZE}.png")
     plt.close()
 
 
