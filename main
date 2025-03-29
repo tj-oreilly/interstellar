@@ -1,0 +1,571 @@
+import os
+import re
+from itertools import combinations
+from math import sqrt
+
+import matplotlib.colors as mcolors
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+
+# Constants
+SPEED_OF_LIGHT = 9.715e-9  # pc/s
+GRAVITATIONAL_CONST = 6.67430e-11  # m^3 kg^-1 s^-2
+SOLAR_MASS = 1.989e30  # kg
+SOLAR_RADIUS = 695700 # km
+PC_TO_M = 3.0857e16  # parsec to meters
+PC_PER_S_TO_KM_PER_H = 3.0857e13 * 3600
+SECONDS_IN_YEAR = 31_557_600
+MIN_STEP = 9.715e-11  # pc/s
+MAX_STEP = 9.715e-11  # pc/s
+N_STOPS = 6
+V_STAR = 7e-12  # pc/s
+PROBE_MASS = 478  # kg
+
+# Globals
+STEP_SIZES = np.arange(MIN_STEP, MAX_STEP + 1e-12, 5e-11)
+
+# GAIA data.csv file
+GAIA_data_path = "GAIA_data/data_GAIA_radius_=_20pc_parallax_error<5percent.csv"
+
+sun_coord = pd.DataFrame({'x [pc]': [0.0], 'y [pc]': [0.0]})
+sun_params = pd.DataFrame({
+    'ra': [0.0],
+    'dec': [0.0],
+    'parallax': [1.0],
+    'teff_gspphot': [5778.0],
+    'radius_gspphot': [1.0]
+})
+
+
+#/////GENERATORS//////////GENERATORS//////////GENERATORS//////////GENERATORS//////////GENERATORS//////////GENERATORS//////////GENERATORS/////
+
+def take_stars_from_GAIA_data():
+    global stars_coordinates, N_OF_STARS, SPACE_SIZE, radius, stars_parameters
+
+    data_filename = os.path.basename(GAIA_data_path)
+    match = re.search(r'data_GAIA_radius_=_([0-9]+)pc_parallax_error<5percent', data_filename)
+
+    if not match:
+        raise ValueError("Could not extract radius from filename.")
+
+    radius = int(match.group(1))
+    SPACE_SIZE = 2 * radius
+
+    GAIA_data = pd.read_csv(GAIA_data_path)
+
+    ra_rad = np.deg2rad(GAIA_data['ra'])
+    dec_rad = np.deg2rad(GAIA_data['dec'])
+    distance_pc = 1000 / GAIA_data['parallax']
+
+    GAIA_data['x [pc]'] = distance_pc * np.cos(dec_rad) * np.cos(ra_rad)
+    GAIA_data['y [pc]'] = distance_pc * np.cos(dec_rad) * np.sin(ra_rad)
+
+    stars_coordinates = pd.concat([
+        sun_coord,
+        GAIA_data[['x [pc]', 'y [pc]']]
+    ], ignore_index=True)
+
+    stars_parameters = pd.concat([
+        sun_params,
+        GAIA_data.drop(columns=['x [pc]', 'y [pc]'])
+    ], ignore_index=True)
+
+    N_OF_STARS = len(stars_coordinates)
+    print(f"{len(GAIA_data)} stars are in GAIA dataset")
+    
+    return radius, SPACE_SIZE
+
+
+def generate_stops(N_STOPS, stars_coordinates):
+    if N_STOPS == 0:
+        return [0]  # Only the Sun
+    random_stops = stars_coordinates.iloc[1:].sample(n=N_STOPS).index.tolist()  
+    return [0] + random_stops # 0 is Sun
+
+
+#/////COMPUTATIONS_AND_CONDITIONS/////#/////COMPUTATIONS_AND_CONDITIONS/////#/////COMPUTATIONS_AND_CONDITIONS/////#/////COMPUTATIONS_AND_CONDITIONS/////
+
+def check_if_objects_do_not_intersect(x1, y1, r1, x2, y2, r2):
+    return sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2) > (r1 + r2)
+
+
+def compute_distances_between_objects(x1, y1, x2, y2):
+    return sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
+
+def check_path_validity(angles_and_r0, parameters_df):
+    """
+    Check whether the path is valid by ensuring each star's deflection r0
+    is greater than its physical radius.
+    """
+    for idx, _, r0 in angles_and_r0:
+        star_radius_km = parameters_df.loc[idx, 'radius_gspphot'] * SOLAR_RADIUS
+        if r0 < star_radius_km:
+            print(
+                f"🚫 Invalid path: r0 = {r0:.3e} < radius = {star_radius_km:.3e} for star idx = {idx}"
+            )
+            return False
+    return True
+
+#//////HELD_KARP_PATHFINDING///////////HELD_KARP_PATHFINDING///////////HELD_KARP_PATHFINDING///////////HELD_KARP_PATHFINDING///////////HELD_KARP_PATHFINDING/////
+
+def find_best_stop_order(selected_stops, step_size):
+    n = len(selected_stops)
+
+    # Build distance matrix
+    dist = [[0] * n for _ in range(n)]
+    for i in range(n):
+        for j in range(n):
+            if i != j:
+                x1, y1 = stars_coordinates.loc[selected_stops[i]]
+                x2, y2 = stars_coordinates.loc[selected_stops[j]]
+                d = compute_distances_between_objects(x1, y1, x2, y2)
+                dist[i][j] = d / step_size  # convert to travel time
+            else:
+                dist[i][j] = float('inf')
+
+    # Held-Karp DP
+    C = {}
+    for k in range(1, n):
+        C[(frozenset([k]), k)] = (dist[0][k], [0, k])
+
+    for s in range(2, n):
+        for subset in combinations(range(1, n), s):
+            S = frozenset(subset)
+            for k in subset:
+                prev_set = S - {k}
+                min_cost = float('inf')
+                best_path = []
+                for m in prev_set:
+                    cost, path = C[(prev_set, m)]
+                    new_cost = cost + dist[m][k]
+                    if new_cost < min_cost:
+                        min_cost = new_cost
+                        best_path = path + [k]
+                C[(S, k)] = (min_cost, best_path)
+
+    # Choose shortest ending path (not necessarily returning to start)
+    full_set = frozenset(range(1, n))
+    min_total = float('inf')
+    final_path = []
+    for k in range(1, n):
+        cost, path = C[(full_set, k)]
+        if cost < min_total:
+            min_total = cost
+            final_path = path
+
+    stop_order = [selected_stops[i] for i in final_path]
+
+    # Compute travel details
+    total_dist = 0
+    full_path = []
+
+    velocity = step_size
+    for i in range(len(stop_order) - 1):
+        start_idx = stop_order[i]
+        end_idx = stop_order[i + 1]
+        x1, y1 = stars_coordinates.loc[start_idx]
+        x2, y2 = stars_coordinates.loc[end_idx]
+        dist_ = compute_distances_between_objects(x1, y1, x2, y2)
+        total_dist += dist_
+        if i == 0:
+            full_path.append(start_idx)
+        full_path.append(end_idx)
+        if i < len(stop_order) - 2:
+            velocity = relativistic_velocity_addition(velocity, 2 * V_STAR)
+
+    return stop_order, total_dist, full_path, C
+
+
+
+#////////PHYSICS///////////////PHYSICS///////////////PHYSICS///////////////PHYSICS///////////////PHYSICS///////////////PHYSICS///////
+
+def time_dilation_segments(segment_times, segment_velocities):
+    proper_time = 0
+    for t, v in zip(segment_times, segment_velocities):
+        if v >= SPEED_OF_LIGHT:
+            raise ValueError("Velocity must be less than the speed of light.")
+        gamma = 1 / sqrt(1 - (v ** 2) / SPEED_OF_LIGHT ** 2)
+        proper_time += t / gamma
+    return proper_time
+
+
+def relativistic_kinetic_energy(mass, velocity, c=SPEED_OF_LIGHT):
+    if velocity >= c:
+        raise ValueError("Velocity must be less than the speed of light.")
+    gamma = 1 / sqrt(1 - (velocity ** 2) / c ** 2)
+    return (gamma - 1) * mass * c ** 2
+
+
+def relativistic_velocity_addition(u, v, c=SPEED_OF_LIGHT):
+    return (u + v) / (1 + (u * v) / (c ** 2))
+
+def relativistic_velocity_addition_2d(v_probe, v_star, c):
+    """
+    Apply relativistic velocity addition for 2D vectors.
+    v_probe is the velocity in one frame, v_star is the frame velocity.
+    """
+    vx, vy = v_probe
+    ux, uy = v_star
+
+    dot = (vx * ux + vy * uy) / c ** 2
+    gamma = 1 / np.sqrt(1 - (ux ** 2 + uy ** 2) / c ** 2) if (ux ** 2 + uy ** 2) != 0 else 1.0
+
+    denominator = 1 + dot
+    if ux ** 2 + uy ** 2 == 0:
+        vx_prime = vx
+        vy_prime = vy
+    else:
+        vx_prime = (
+            vx + ux + (gamma - 1) * (vx * ux + vy * uy) * ux / (ux ** 2 + uy ** 2)
+        ) / denominator
+        vy_prime = (
+            vy + uy + (gamma - 1) * (vx * ux + vy * uy) * uy / (ux ** 2 + uy ** 2)
+        ) / denominator
+
+    return np.array([vx_prime, vy_prime])
+
+def rotate_vector(v, angle_rad):
+    """
+    Rotate a 2D vector v by angle_rad (counterclockwise).
+    """
+    rotation_matrix = np.array([
+        [np.cos(angle_rad), -np.sin(angle_rad)],
+        [np.sin(angle_rad), np.cos(angle_rad)]
+    ])
+    return rotation_matrix @ v
+
+
+def get_star_velocity_vector(idx, coordinates_df, parameters_df):
+    """
+    Use GAIA radial velocity to compute a 2D velocity vector
+    in the direction from the Sun to the star.
+    """
+    star_pos = coordinates_df.loc[idx][['x [pc]', 'y [pc]']].values
+    sun_pos = coordinates_df.loc[0][['x [pc]', 'y [pc]']].values
+    direction_vector = star_pos - sun_pos
+    unit_vector = direction_vector / np.linalg.norm(direction_vector)
+
+    if 'radial_velocity' in parameters_df.columns:
+        rv_km_s = parameters_df.loc[idx, 'radial_velocity']
+        if np.isnan(rv_km_s):
+            return np.zeros(2)
+        rv_pc_s = rv_km_s * 1000 / PC_TO_M
+    else:
+        rv_pc_s = 0.0
+
+    return rv_pc_s * unit_vector
+
+#////////SLINGSHOT_PHYSICS///////////////SLINGSHOT_PHYSICS///////////////SLINGSHOT_PHYSICS///////////////SLINGSHOT_PHYSICS///////////////SLINGSHOT_PHYSICS////
+
+def deflection_angle_from_path(path_indices, coordinates_df, parameters_df, velocity_magnitudes_pc_s):
+    """
+    Compute deflection angle (deg) and r0 (km) at each intermediate stop.
+
+    Returns:
+    - List of tuples: (index, deflection_angle_deg, r0_km)
+    """
+    results = []
+
+    for i in range(1, len(path_indices) - 1):
+        a = coordinates_df.loc[path_indices[i - 1], ['x [pc]', 'y [pc]']].values
+        b = coordinates_df.loc[path_indices[i], ['x [pc]', 'y [pc]']].values
+        c_ = coordinates_df.loc[path_indices[i + 1], ['x [pc]', 'y [pc]']].values
+
+        vec_in = a - b
+        vec_out = c_ - b
+
+        vec_in_unit = vec_in / np.linalg.norm(vec_in)
+        vec_out_unit = vec_out / np.linalg.norm(vec_out)
+
+        dot = np.clip(np.dot(vec_in_unit, vec_out_unit), -1.0, 1.0)
+        theta_rad = np.arccos(dot)
+        deflection_rad = np.pi - theta_rad
+        deflection_angle = np.degrees(deflection_rad)
+
+        star_mass_solar = parameters_df.loc[path_indices[i], 'mass_flame']
+        M = star_mass_solar * SOLAR_MASS  # kg
+        C = SPEED_OF_LIGHT * PC_TO_M
+
+        initial_velocity = velocity_magnitudes_pc_s[i - 1] * PC_TO_M  # m/s
+
+        if deflection_rad == 0:
+            r0_km = float('inf')
+        else:
+            r0_m = (2 * GRAVITATIONAL_CONST * M / deflection_rad) * (
+                1 / C ** 2 + 1 / initial_velocity ** 2
+            )
+            r0_km = r0_m * 1e-3
+
+        results.append((path_indices[i], deflection_angle, r0_km))
+
+    return results
+
+
+def apply_relativistic_gravity_assists(
+    path_indices,
+    deflection_data,
+    coordinates_df,
+    parameters_df,
+    step_size_pc_per_s
+):
+    """
+    Compute probe velocity after each gravitational assist using GAIA radial velocities.
+
+    Returns:
+    - velocities: list of 2D velocity vectors after each assist
+    - gains: list of velocity gains (in pc/s) at each assist (Δv = v_after - v_before)
+    """
+    c = SPEED_OF_LIGHT
+    velocities = []
+    gains = []
+
+    # Initial probe velocity vector: from Sun to first star
+    v_probe = step_size_pc_per_s * (
+        coordinates_df.loc[path_indices[1], ['x [pc]', 'y [pc]']].values -
+        coordinates_df.loc[path_indices[0], ['x [pc]', 'y [pc]']].values
+    )
+    v_probe = v_probe / np.linalg.norm(v_probe) * step_size_pc_per_s
+
+    for i, (idx, deflection_deg, _) in enumerate(deflection_data):
+        deflection_rad = np.radians(deflection_deg)
+
+        # Compute v_before based on path between previous and current star
+        p_prev = coordinates_df.loc[path_indices[i], ['x [pc]', 'y [pc]']].values
+        p_curr = coordinates_df.loc[path_indices[i + 1], ['x [pc]', 'y [pc]']].values
+        direction = p_curr - p_prev
+        direction /= np.linalg.norm(direction)
+
+        v_before = np.linalg.norm(v_probe)
+        v_before_vector = v_before * direction
+
+        # Get star's velocity vector
+        v_star = get_star_velocity_vector(idx, coordinates_df, parameters_df)
+
+        # Apply assist
+        v_in_star_frame = relativistic_velocity_addition_2d(
+            v_before_vector, -v_star, c
+        )
+        v_rotated = rotate_vector(v_in_star_frame, deflection_rad)
+        v_after_vector = relativistic_velocity_addition_2d(
+            v_rotated, v_star, c
+        )
+
+        # Update probe velocity
+        v_probe = v_after_vector
+        gain = np.linalg.norm(v_after_vector) - np.linalg.norm(v_before_vector)
+
+        velocities.append(v_after_vector.copy())
+        gains.append(gain)
+
+    return velocities, gains
+
+
+#///////SIMULATION_AND_PLOTTING//////////////SIMULATION_AND_PLOTTING//////////////SIMULATION_AND_PLOTTING//////////////SIMULATION_AND_PLOTTING///////
+
+def setup_star_map(ax, radius: float):
+    """
+    Set up the starfield plot background and render all stars with scaling and colors.
+    """
+    ax.set_facecolor("black")
+
+    radii_scaled = radius * stars_parameters['radius_gspphot'] / stars_parameters['radius_gspphot'].max()
+
+    scatter = ax.scatter(
+        stars_coordinates['x [pc]'],
+        stars_coordinates['y [pc]'],
+        s=radii_scaled,
+        c=stars_parameters['teff_gspphot'],
+        cmap='plasma',
+        norm=mcolors.Normalize(
+            vmin=stars_parameters['teff_gspphot'].min(),
+            vmax=stars_parameters['teff_gspphot'].max()
+        ),
+        alpha=0.85,
+        edgecolors='none'
+    )
+
+    return scatter
+
+
+def simulate_probe_path(step_size: float, space_size: float):
+    stops = generate_stops(N_STOPS, stars_coordinates)
+    best_order, total_dist, path_indices, hk_table = find_best_stop_order(stops, step_size)
+
+    # --- Step 1: use dummy constant velocity to get deflection angles ---
+    dummy_velocity_list = [step_size for _ in range(len(path_indices) - 2)]
+    dummy_deflection = deflection_angle_from_path(
+        path_indices=path_indices,
+        coordinates_df=stars_coordinates,
+        parameters_df=stars_parameters,
+        velocity_magnitudes_pc_s=dummy_velocity_list
+    )
+
+    # --- Step 2: apply assists using dummy deflections ---
+    velocities, velocity_gains = apply_relativistic_gravity_assists(
+        path_indices=path_indices,
+        deflection_data=dummy_deflection,
+        coordinates_df=stars_coordinates,
+        parameters_df=stars_parameters,
+        step_size_pc_per_s=step_size
+    )
+
+    # --- Step 3: recalculate true deflections using actual velocities ---
+    velocity_magnitudes_pc_s = [np.linalg.norm(v) for v in velocities]
+    angles_and_r0 = deflection_angle_from_path(
+        path_indices=path_indices,
+        coordinates_df=stars_coordinates,
+        parameters_df=stars_parameters,
+        velocity_magnitudes_pc_s=velocity_magnitudes_pc_s
+    )
+
+    # ✅ Final check: real r0 vs radius
+    if not check_path_validity(angles_and_r0, stars_parameters):
+        return None
+
+    # --- Time dilation and energy ---
+    velocity_magnitudes = [step_size] + velocity_magnitudes_pc_s
+    segment_distances = [
+        np.linalg.norm(
+            stars_coordinates.loc[path_indices[i + 1]][['x [pc]', 'y [pc]']].values -
+            stars_coordinates.loc[path_indices[i]][['x [pc]', 'y [pc]']].values
+        )
+        for i in range(len(path_indices) - 1)
+    ]
+
+    observer_time = 0
+    proper_time = 0
+    for d, v in zip(segment_distances, velocity_magnitudes):
+        t = d / v
+        observer_time += t
+        gamma = 1 / np.sqrt(1 - (v ** 2 / SPEED_OF_LIGHT ** 2))
+        proper_time += t / gamma
+
+    delta_time = observer_time - proper_time
+    observer_years = observer_time / SECONDS_IN_YEAR
+    probe_years = proper_time / SECONDS_IN_YEAR
+    diff_years = delta_time / SECONDS_IN_YEAR
+    final_velocity = velocity_magnitudes[-1]
+    energy_gain = relativistic_kinetic_energy(PROBE_MASS, final_velocity)
+
+    print(
+        f"STEP_SIZE = {step_size}, Travel time: {observer_time:.2f} s "
+        f"({observer_years:.2f} yrs, observer), {proper_time:.2f} s "
+        f"({probe_years:.2f} yrs, probe)"
+    )
+
+    # --- Log the simulation ---
+    os.makedirs("Logs", exist_ok=True)
+    with open(f"Logs/Simulation_PF_STEP_SIZE={step_size}.txt", "w") as f:
+        f.write(f"Number of stars: {N_OF_STARS}\n")
+        f.write(f"Number of stops: {N_STOPS}\n")
+        f.write(f"Order of stops: {best_order}\n")
+        f.write(f"Start stop: {best_order[0]}\n")
+        f.write(f"End stop: {best_order[-1]}\n")
+        f.write(f"Velocity of the ship (initial): {step_size * PC_PER_S_TO_KM_PER_H:.2e} km/h\n")
+        f.write(f"Final velocity (after assists): {final_velocity * PC_PER_S_TO_KM_PER_H:.2e} km/h\n")
+        f.write(f"Total path length: {total_dist:.2f} pc\n")
+        f.write(f"Observer frame time: {observer_time:.2f} s ({observer_years:.2f} years)\n")
+        f.write(f"Probe frame time: {proper_time:.2f} s ({probe_years:.2f} years)\n")
+        f.write(f"Time dilation: {delta_time:.2f} s ({diff_years:.2f} years)\n")
+        f.write(f"Energy gain: {energy_gain:.3e} J\n\n")
+
+        f.write("\n=== HELD-KARP DP TABLE ===\n")
+        for (subset, end), (cost, path_idx) in hk_table.items():
+            subset_str = "{" + ",".join(str(best_order[i]) for i in subset) + "}"
+            path_str = " → ".join(str(best_order[i]) for i in path_idx)
+            f.write(
+                f"S = {subset_str:10s}, end = {best_order[end]:2d}, "
+                f"g = {cost:.2f}, path = [{path_str}]\n"
+            )
+
+        f.write("\n")
+        for i, ((idx, angle, r0), v_vec, gain) in enumerate(zip(angles_and_r0, velocities, velocity_gains), start=1):
+            v_mag_pc_s = np.linalg.norm(v_vec)
+            v_kmh = v_mag_pc_s * PC_PER_S_TO_KM_PER_H
+            gain_km_h = gain * PC_PER_S_TO_KM_PER_H
+            f.write(
+                f"Stop {i+1} (index {idx}): deflection = {angle:.3f} deg, "
+                f"r0 = {r0:.4e} km, |v| = {v_kmh:.3e} km/h, Δv = {gain_km_h:.3e} km/h \n"
+            )
+
+    return best_order, path_indices, angles_and_r0, velocities, velocity_gains
+
+
+def plotting_function(
+    ax,
+    scatter_obj,
+    step_size: float,
+    best_order: list,
+    path_indices: list,
+    space_size: float
+):
+    offset = space_size * 0.02
+
+    # Draw probe stops
+    for i, stop in enumerate(best_order):
+        x = stars_coordinates.loc[stop, "x [pc]"]
+        y = stars_coordinates.loc[stop, "y [pc]"]
+        ax.scatter(x, y, color="orange", s=40, zorder=5)
+        ax.text(x + offset, y + offset, str(i + 1), color="orange", fontsize=10, weight="bold")
+
+    # Draw path line
+    coords = stars_coordinates.loc[path_indices]
+    ax.plot(
+        coords["x [pc]"],
+        coords["y [pc]"],
+        color='purple', linestyle='-', linewidth=1,
+        marker='o', markersize=3, label="Rocket Path"
+    )
+
+    # Final plot touches
+    ax.legend()
+    ax.scatter(0, 0, color='red', s=80, label='Sun', zorder=5)
+    ax.set_xlabel('x [pc]', color='white')
+    ax.set_ylabel('y [pc]', color='white')
+    ax.set_title('Star Map (within 20 parsecs)', color='white')
+    ax.legend(facecolor='black', edgecolor='white', labelcolor='white')
+
+    cbar = plt.colorbar(scatter_obj)
+    cbar.set_label('Temperature [K]', color='white')
+    cbar.ax.yaxis.set_tick_params(color='white')
+    plt.setp(plt.getp(cbar.ax.axes, 'yticklabels'), color='white')
+    ax.tick_params(colors='white')
+    plt.grid(True, linestyle='--', alpha=0.3)
+
+    os.makedirs("Diagrams/Pathfinding_diagrams", exist_ok=True)
+    plt.savefig(f"Diagrams/Pathfinding_diagrams/Simulation_PF_STEP_SIZE={step_size}.png")
+    plt.close()
+
+
+def create_space(step_size, radius, space_size):
+    fig = plt.subplots(figsize=(10, 8), facecolor='black')
+    ax = plt.gca()
+
+    sc = setup_star_map(ax, radius)
+
+    if N_STOPS != 0:
+        result = simulate_probe_path(step_size, space_size)
+        if result is None:
+            return
+
+        best_order, path_indices, angles_and_r0, velocities, velocity_gains = result
+
+        plotting_function(
+            ax=ax,
+            scatter_obj=sc,
+            step_size=step_size,
+            best_order=best_order,
+            path_indices=path_indices,
+            space_size=space_size
+        )
+
+#/////////MAIN_CODE//////////////MAIN_CODE//////////////MAIN_CODE//////////////MAIN_CODE//////////////MAIN_CODE//////////////MAIN_CODE/////
+
+def main():
+    radius, space_size = take_stars_from_GAIA_data()
+    for step in STEP_SIZES:
+        create_space(step, radius, space_size)
+
+if __name__ == "__main__":
+    main()
