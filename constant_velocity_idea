@@ -1,0 +1,177 @@
+# Downgraded version of the simulation
+# Assumptions: constant probe velocity, no star velocities, r0 uncertainty only in stellar mass
+
+import os
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import matplotlib.colors as mcolors
+from itertools import combinations
+from math import sqrt
+
+# Constants
+SPEED_OF_LIGHT = 9.715e-9  # pc/s
+GRAVITATIONAL_CONST = 6.67430e-11  # m^3 kg^-1 s^-2
+SOLAR_MASS = 1.989e30  # kg
+SOLAR_RADIUS = 695700  # km
+PROBE_MASS = 478  # kg
+PC_TO_M = 3.0857e16
+SECONDS_IN_YEAR = 31_557_600
+
+# Parameters
+N_STOPS = 6
+GAIA_data_path = "GAIA_data/data_GAIA_radius_=_20pc_parallax_error<5percent.csv"
+
+sun_coord = pd.DataFrame({'x [pc]': [0.0], 'y [pc]': [0.0]})
+sun_params = pd.DataFrame({
+    'ra': [0.0], 'dec': [0.0], 'parallax': [1.0],
+    'teff_gspphot': [5778.0], 'radius_gspphot': [1.0], 'mass_flame': [1.0],
+    'mass_flame_upper': [1.1], 'mass_flame_lower': [0.9], 'radius_flame_upper': [1.1]
+})
+
+def take_stars():
+    global stars_coordinates, stars_parameters
+    data = pd.read_csv(GAIA_data_path)
+    ra_rad = np.deg2rad(data['ra'])
+    dec_rad = np.deg2rad(data['dec'])
+    distance_pc = 1000 / data['parallax']
+    data['x [pc]'] = distance_pc * np.cos(dec_rad) * np.cos(ra_rad)
+    data['y [pc]'] = distance_pc * np.cos(dec_rad) * np.sin(ra_rad)
+    stars_coordinates = pd.concat([sun_coord, data[['x [pc]', 'y [pc]']]], ignore_index=True)
+    stars_parameters = pd.concat([sun_params, data.drop(columns=['x [pc]', 'y [pc]'])], ignore_index=True)
+
+def generate_stops(seed=None):
+    return [0] + stars_coordinates.iloc[1:].sample(n=N_STOPS, random_state=seed).index.tolist()
+
+def compute_distance(x1, y1, x2, y2):
+    return sqrt((x2 - x1)**2 + (y2 - y1)**2)
+
+def deflection_angle(path):
+    results = []
+    for i in range(1, len(path) - 1):
+        a = stars_coordinates.loc[path[i - 1]].values
+        b = stars_coordinates.loc[path[i]].values
+        c = stars_coordinates.loc[path[i + 1]].values
+        vec_in = a - b
+        vec_out = c - b
+        dot = np.dot(vec_in, vec_out) / (np.linalg.norm(vec_in) * np.linalg.norm(vec_out))
+        theta = np.arccos(np.clip(dot, -1.0, 1.0))
+        deflection = np.pi - theta
+        results.append((path[i], np.degrees(deflection)))
+    return results
+
+def vmax_for_stars(deflections):
+    results = []
+    for idx, angle_deg in deflections:
+        theta = np.radians(angle_deg)
+        M = stars_parameters.loc[idx, 'mass_flame'] * SOLAR_MASS
+        R = stars_parameters.loc[idx, 'radius_flame_upper'] * SOLAR_RADIUS * 1e3  # km to m
+        if theta == 0 or np.sin(theta / 2) == 0:
+            vmax = 0.0
+        else:
+            vmax = np.sqrt(GRAVITATIONAL_CONST * M / R * (1 / np.sin(theta / 2) - 1))
+        results.append(vmax / PC_TO_M)  # convert to pc/s
+    return results
+
+def r0_from_velocity(deflections, v):
+    results = []
+    for idx, angle_deg in deflections:
+        theta = np.radians(angle_deg)
+        M = stars_parameters.loc[idx, 'mass_flame'] * SOLAR_MASS
+        if theta == 0 or np.sin(theta / 2) == 0:
+            r0 = float('inf')
+        else:
+            r0 = GRAVITATIONAL_CONST * M / (v * PC_TO_M)**2 * (1 / np.sin(theta / 2) - 1)
+        results.append((idx, r0 * 1e-3))  # in km
+    return results
+
+def r0_uncertainty(deflections, v):
+    results = []
+    for idx, angle_deg in deflections:
+        theta = np.radians(angle_deg)
+        M = stars_parameters.loc[idx, 'mass_flame'] * SOLAR_MASS
+        dM = ((stars_parameters.loc[idx, 'mass_flame_upper'] - stars_parameters.loc[idx, 'mass_flame_lower']) / 2) * SOLAR_MASS
+        if theta == 0 or np.sin(theta / 2) == 0:
+            sigma_r0 = float('inf')
+        else:
+            dr0_dM = GRAVITATIONAL_CONST / (v * PC_TO_M)**2 * (1 / np.sin(theta / 2) - 1)
+            sigma_r0 = dr0_dM * dM / 1e3
+        results.append((idx, sigma_r0))
+    return results
+
+def check_validity(r0s, uncertainties):
+    for (idx, r0), (_, sigma) in zip(r0s, uncertainties):
+        upper_radius_km = stars_parameters.loc[idx, 'radius_flame_upper'] * SOLAR_RADIUS
+        if r0 - sigma < upper_radius_km:
+            return False
+    return True
+
+def held_karp_path(stops):
+    n = len(stops)
+    matrix = [[float('inf')] * n for _ in range(n)]
+    for i in range(n):
+        for j in range(n):
+            if i != j:
+                xi, yi = stars_coordinates.loc[stops[i]].values
+                xj, yj = stars_coordinates.loc[stops[j]].values
+                matrix[i][j] = compute_distance(xi, yi, xj, yj)
+
+    C = {}
+    for k in range(1, n):
+        C[(frozenset([k]), k)] = (matrix[0][k], [0, k])
+
+    for s in range(2, n):
+        for subset in combinations(range(1, n), s):
+            S = frozenset(subset)
+            for k in subset:
+                prev_set = S - {k}
+                min_cost, best_path = float('inf'), []
+                for m in prev_set:
+                    cost, path = C[(prev_set, m)]
+                    new_cost = cost + matrix[m][k]
+                    if new_cost < min_cost:
+                        min_cost = new_cost
+                        best_path = path + [k]
+                C[(S, k)] = (min_cost, best_path)
+
+    full = frozenset(range(1, n))
+    min_cost, best = float('inf'), []
+    for k in range(1, n):
+        cost, path = C[(full, k)]
+        if cost < min_cost:
+            min_cost = cost
+            best = path
+
+    return [stops[i] for i in best]
+
+def simulate():
+    take_stars()
+    valid_count = 0
+    for seed in range(10000):
+        stops = generate_stops(seed=seed)
+        path = held_karp_path(stops)
+        deflections = deflection_angle(path)
+        vmax_list = vmax_for_stars(deflections)
+        if not vmax_list:
+            continue
+        for v in vmax_list:
+            r0s = r0_from_velocity(deflections, v)
+            uncertainties = r0_uncertainty(deflections, v)
+            if check_validity(r0s, uncertainties):
+                valid_count += 1
+                log_results(deflections, r0s, uncertainties, v)
+    print(f"Number of valid simulations: {valid_count}/10000")
+
+def log_results(deflections, r0s, r0_uncertainties, v):
+    os.makedirs("Logs", exist_ok=True)
+    with open("Logs/downgraded_log.txt", "a") as f:
+        f.write("--- New Simulation ---\n")
+        f.write(f"Initial velocity: {v:.3e} pc/s\n")
+        for (idx, angle), (_, r0), (_, sigma_r0) in zip(deflections, r0s, r0_uncertainties):
+            f.write(f"Star index: {idx}\n")
+            f.write(f"  Deflection angle: {angle:.3f} deg\n")
+            f.write(f"  Periapsis r0: {r0:.3e} km\n")
+            f.write(f"  Uncertainty in r0: ±{sigma_r0:.2e} km\n\n")
+
+if __name__ == "__main__":
+    simulate()
