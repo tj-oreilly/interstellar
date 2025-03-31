@@ -1,0 +1,14 @@
+SELECT 
+  s.source_id, s.ra, s.dec, s.parallax, s.phot_g_mean_mag, 
+  ap.mass_flame, ap.radius_gspphot, ap.teff_gspphot, ap.lum_flame
+FROM gaiadr3.gaia_source AS s
+JOIN gaiadr3.astrophysical_parameters AS ap
+  ON s.source_id = ap.source_id
+WHERE (1000.0 / s.parallax) <= 100
+  AND s.parallax > 0
+  AND s.parallax_over_error > 5
+  AND s.astrometric_params_solved = 31
+  AND ap.radius_gspphot IS NOT NULL
+  AND ap.mass_flame IS NOT NULL
+  AND ap.teff_gspphot IS NOT NULL
+  AND ap.lum_flame IS NOT NULL;
