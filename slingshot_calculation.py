@@ -126,32 +126,12 @@ def plotting_function(stars_data, path):
     plt.show()
 
 
-def calculate_periapsis(b, v, M):
+def calculate_deflection(r, v, M):
     """
-    Calculates the periapsis given the impact parameter, approach velocity, and star mass.
+    Calculates the deflection angle given the periapsis, approach velocity and star mass.
 
     Parameters:
-        b (float): The impact parameter (AU)
-        v (float): The approach velocity (km/s)
-        M (float): The mass of the star (solar mass)
-
-    Returns:
-        float: The periapsis (AU)
-    """
-
-    b_km = b * AU  # Convert to km
-    GM = G * SOLAR_MASS * M * 1e-9  # Get GM in km^3 M_sol^-1 s^-2
-
-    periapsis = GM / (v**2 + np.sqrt(v**4 + (2 * GM * v**2) / b_km))
-    return periapsis / AU  # Convert back to AU
-
-
-def calculate_deflection(b, v, M):
-    """
-    Calculates the deflection angle given the impact parameter, approach velocity and star mass.
-
-    Parameters:
-        b (float): The impact parameter (AU)
+        r (float): The periapsis (AU)
         v (float): The approach velocity (km/s)
         M (float): The mass of the star (solar mass)
 
@@ -159,17 +139,19 @@ def calculate_deflection(b, v, M):
         float: The deflection angle (rad)
     """
 
-    b_km = b * AU  # Convert to km
+    r_km = r * AU  # Convert to km
     GM = G * SOLAR_MASS * M * 1e-9  # Get GM in km^3 M_sol^-1 s^-2
-    return 2.0 * np.arctan(GM / (b_km * v**2))
+    return 2 * np.arcsin(1.0 / (r_km * v**2 / GM + 1))
+
+    # return 2.0 * np.arctan(GM / (b_km * v**2))
 
 
-def calculate_velocity(periapsis, angle, M):
+def calculate_velocity(r, angle, M):
     """
     Calculates the incoming velocity for a given periapsis, deflection angle, and star mass.
 
     Parameters:
-        periapsis (float): The periapsis (AU)
+        r (float): The periapsis (AU)
         angle (float): The deflection angle (rad)
         M (float): The mass of the star (solar mass)
 
@@ -181,44 +163,41 @@ def calculate_velocity(periapsis, angle, M):
         print("Invalid hyperbolic orbit: eccentricity <= 1")
         return None
 
-    periapsis_km = periapsis * AU  # Convert to km
+    r_km = r * AU  # Convert to km
     GM = G * SOLAR_MASS * M * 1e-9  # Get GM in km^3 M_sol^-1 s^-2
-    return np.sqrt((GM * (1.0 / np.cos(angle) - 1)) / periapsis_km)
+    return np.sqrt((GM * (1.0 / np.sin(angle / 2.0) - 1)) / r_km)
 
 
-def calculate_b(v, angle, M):
+def calculate_r(v, angle, M):
+    """
+    Calculates the periapsis given a fixed velocity, deflection angle, and star mass.
+
+    Parameters:
+        v (float): The velocity (km/s)
+        angle (float): The deflection angle (rad)
+        M (float): The mass of the star (solar mass)
+    """
+
     GM = G * SOLAR_MASS * M * 1e-9
-    b = (GM / v**2) * (1.0 / np.tan(angle / 2))
+    b = (GM / v**2) * (1.0 / np.sin(angle / 2) - 1)
 
     return b / AU
 
 
-def solve_for_b(v, target_angle, M):
-    def func(b):
-        return calculate_deflection(b, v, M) - target_angle
-
-    b_solution, info, ier, msg = scipy.optimize.fsolve(
-        func, x0=10.0, full_output=True
-    )  # Initial guess
-
-    print(func(b_solution))
-
-    return b_solution[0]
-
-
+# Scipy optimise functions
 def objective(x):
-    b, v = x
-    return -v  # Maximizing v, so we minimize -v
+    r, v = x
+    return -v
 
 
 def constraint_deflection(x, target_deflection, M):
-    b, v = x
-    return calculate_deflection(b, v, M) - target_deflection
+    r, v = x
+    return calculate_deflection(r, v, M) - target_deflection
 
 
 def constraint_periapsis(x, min_periapsis, M):
-    b, v = x
-    return calculate_periapsis(b, v, M) - min_periapsis
+    r, v = x
+    return r - min_periapsis
 
 
 def solve_parameters(target_deflection, min_periapsis, M, initial_guess=(1.0, 1.0)):
@@ -244,7 +223,7 @@ def solve_parameters(target_deflection, min_periapsis, M, initial_guess=(1.0, 1.
     result = minimize(objective, initial_guess, constraints=constraints, method="SLSQP")
 
     if result.success:
-        return result.x  # Optimized (b, v)
+        return result.x  # Optimized (r, v)
     else:
         raise ValueError("Optimization failed")
 
@@ -278,34 +257,37 @@ def calculate_slingshot_params(stars_data, path, defined_v=None):
         cos_dist = scipy.spatial.distance.cosine(in_dir, out_dir)
         angle = np.arccos(1 - cos_dist)
 
+        if angle > np.deg2rad(179):  # Doesn't handle close to 180 degrees well
+            print("Sharp slingshot encountered... skipping")
+            continue
+
         if defined_v is not None:
-            b = calculate_b(defined_v, angle, star_mass)
-            print(f"Slingshot {i + 1}, b = {b} AU")
+            r = calculate_r(defined_v, angle, star_mass)
+            print(f"Slingshot {i + 1}, r_min = {r:.4f} AU")
 
             continue
 
         # Find fastest velocity such that r_min > 1.5 R
         try:
-            b, v = solve_parameters(angle, star_rad * 1.5, star_mass, (0.01, 1.0))
+            r, v = solve_parameters(angle, star_rad * 1.5, star_mass, (0.01, 100.0))
 
         except ValueError:
-            print(f"Failed to find slingshot {i + 1}\n")
-            print("Parameters:")
-            print(f"  Angle = {np.degrees(angle):.1f} deg")
-            print(f"   Mass = {star_mass:.1f} solar masses")
-            print(f" Radius = {star_rad} AU")
-            print("")
-            continue
+            print(f"Failed to find slingshot {i + 1}, angle = {angle}\n")
+            # print("Parameters:")
+            # print(f"  Angle = {np.degrees(angle):.1f} deg")
+            # print(f"   Mass = {star_mass:.1f} solar masses")
+            # print(f" Radius = {star_rad} AU")
+            # print("")
 
-        periapsis = calculate_periapsis(b, v, star_mass)
-        deflection_angle = calculate_deflection(b, v, star_mass)
+            return
+
+        deflection_angle = calculate_deflection(r, v, star_mass)
 
         print(f"Slingshot {i + 1}:")
         print(f"Desired angle = {np.degrees(angle):.1f} deg")
         print(f"    Angle = {np.degrees(deflection_angle):.1f} deg")
-        print(f"        b = {b:.1f} AU")
-        print(f"        v = {v:.1f} km/s")
-        print(f"Periapsis = {periapsis} AU")
+        print(f"        v = {v:.4f} km/s")
+        print(f"Periapsis = {r:.4f} AU")
         print(f"Star mass = {star_mass:.1f} solar masses")
         print(f" Star rad = {star_rad} AU")
 
@@ -318,66 +300,6 @@ def calculate_slingshot_params(stars_data, path, defined_v=None):
     return max_v
 
 
-def example_slingshot():
-    """
-    Some debug code to test an example slingshot, plotting the parameter space in b and v and try
-    to optimize the velocity from this in a crude way.
-    """
-
-    star_mass = 1.0  # Solar masses
-    star_rad = 0.01  # AU
-    target_deflect = np.deg2rad(133.0)
-
-    b_values = np.linspace(0.01, 10.0, 1000)
-    v_values = np.linspace(0.001, 100.0, 1000)
-    B, V = np.meshgrid(b_values, v_values)
-
-    Z = np.degrees(calculate_deflection(B, V, star_mass))
-
-    plt.figure(figsize=(10, 8))
-    heatmap = plt.pcolormesh(B, V, Z, cmap=cm.viridis, shading="auto")
-    plt.colorbar(heatmap, label="Deflection angle (degrees)")
-
-    plt.xlabel("Impact parameter (AU)")
-    plt.ylabel("Velocity (km/s)")
-    plt.title("Deflection angles")
-
-    plt.tight_layout()
-    plt.show()
-
-    b_opt = None
-    v_max = None
-    periapsis_found = None
-
-    for b in b_values:
-        found_v = 0.0
-        min_value = None
-
-        for v in v_values:
-            calc_val = np.abs(target_deflect - calculate_deflection(b, v, star_mass))
-            if min_value is None or calc_val < min_value:
-                min_value = calc_val
-                found_v = v
-
-        if min_value < target_deflect * 0.01:  # Within appropriate error
-            periapsis = calculate_periapsis(b, found_v, star_mass)
-            if periapsis > star_rad * 1.5 and (v_max is None or found_v > v_max):
-                v_max = found_v
-                b_opt = b
-                periapsis_found = periapsis
-
-    actual_deflect = np.degrees(calculate_deflection(b_opt, v_max, star_mass))
-
-    print("Found the following configuration:")
-    print(f"Target deflection = {np.degrees(target_deflect)} deg")
-    print(f"Actual deflection = {actual_deflect:.2f} deg")
-    print(f"        Periapsis = {periapsis_found:.2f} AU")
-    print(f"     Impact param = {b_opt:.2f} AU")
-    print(f"         Velocity = {v_max:.2f} km/s")
-
-    print(calculate_velocity(star_rad * 1.5, target_deflect, star_mass))
-
-
 def main():
     # Read in the GAIA file
     stars_data = read_gaia_coords("./gaia_data/100_pc_stars.csv")
@@ -386,17 +308,21 @@ def main():
     stars_data = stars_data[stars_data["pc_dist"] <= PC_LIM].reset_index(drop=True)
 
     # This is fixed for testing purposes (we can define it by TSP or similar later)
-    path = [201, 18, 77, 166, 5]
+    # path = [201, 18, 77, 166, 5]
+    path = np.random.choice(np.arange(0, len(stars_data)), size=100, replace=False)
 
     max_v = calculate_slingshot_params(stars_data, path)
 
+    if max_v is None:
+        return
+
     print(
-        f"\nFor the velocity {max_v:.1f} km/s we have the following impact parameters:"
+        f"\nFor the velocity {max_v:.5f} km/s we have the following impact parameters:"
     )
     calculate_slingshot_params(stars_data, path, max_v)
 
     # Plot stars and path for visualisation
-    # plotting_function(stars_data, path)
+    plotting_function(stars_data, path)
 
 
 if __name__ == "__main__":
