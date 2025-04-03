@@ -7,6 +7,7 @@ This is based upon Sasha's code.
 import pandas as pd
 import numpy as np
 import scipy
+from itertools import combinations
 from scipy.optimize import minimize
 import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
@@ -123,6 +124,7 @@ def plotting_function(stars_data, path):
     plt.setp(plt.getp(cbar.ax.axes, "yticklabels"), color="white")
     ax.tick_params(colors="white")
     plt.grid(True, linestyle="--", alpha=0.3)
+    plt.savefig("path_plot.svg", format="svg")
     plt.show()
 
 
@@ -228,7 +230,7 @@ def solve_parameters(target_deflection, min_periapsis, M, initial_guess=(1.0, 1.
         raise ValueError("Optimization failed")
 
 
-def calculate_slingshot_params(stars_data, path, defined_v=None):
+def calculate_slingshot_params(stars_data, path, defined_v=None, debug_print=False):
     """
     Calculates the maximum velocity and the impact parameter for each slingshot in the path.
     Using the formulae from the online theory doc.
@@ -236,20 +238,22 @@ def calculate_slingshot_params(stars_data, path, defined_v=None):
 
     max_v = 3e5
 
-    prev_pos = np.array([0.0, 0.0])
+    prev_pos = np.array([0.0, 0.0, 0.0])
     for i, node in enumerate(path):
         if i == len(path) - 1:  # Skip final node
             break
 
         star_data = stars_data.loc[node]
 
-        pos = np.array([star_data["x"], star_data["y"]])
+        pos = np.array([star_data["x"], star_data["y"], star_data["z"]])
         star_rad = star_data["radius_gspphot"] * SOLAR_RAD / AU  # In AU
         star_mass = star_data["mass_flame"]  # In solar masses
 
         # The incoming and outgoing directions
         next_star_data = stars_data.loc[path[i + 1]]
-        next_pos = np.array([next_star_data["x"], next_star_data["y"]])
+        next_pos = np.array(
+            [next_star_data["x"], next_star_data["y"], next_star_data["z"]]
+        )
 
         in_dir = pos - prev_pos
         out_dir = next_pos - pos
@@ -259,17 +263,28 @@ def calculate_slingshot_params(stars_data, path, defined_v=None):
 
         if angle > np.deg2rad(179):  # Doesn't handle close to 180 degrees well
             print("Sharp slingshot encountered... skipping")
+            prev_pos = pos
             continue
 
         if defined_v is not None:
             r = calculate_r(defined_v, angle, star_mass)
-            print(f"Slingshot {i + 1}, r_min = {r:.4f} AU")
+            if r < star_rad:
+                print(f"Radius inside star {r} vs {star_rad}!")
 
+            print(
+                f"Slingshot {i + 1}, star_mass = {
+                    star_mass:.2f
+                } solar masses, star_rad = {star_rad:.4f} AU r_min = {
+                    r:.4f
+                } AU, angle = {np.degrees(angle):.2f} deg"
+            )
+
+            prev_pos = pos
             continue
 
         # Find fastest velocity such that r_min > 1.5 R
         try:
-            r, v = solve_parameters(angle, star_rad * 1.5, star_mass, (0.01, 100.0))
+            r, v = solve_parameters(angle, star_rad * 1.01, star_mass, (0.01, 100.0))
 
         except ValueError:
             print(f"Failed to find slingshot {i + 1}, angle = {angle}\n")
@@ -283,21 +298,177 @@ def calculate_slingshot_params(stars_data, path, defined_v=None):
 
         deflection_angle = calculate_deflection(r, v, star_mass)
 
-        print(f"Slingshot {i + 1}:")
-        print(f"Desired angle = {np.degrees(angle):.1f} deg")
-        print(f"    Angle = {np.degrees(deflection_angle):.1f} deg")
-        print(f"        v = {v:.4f} km/s")
-        print(f"Periapsis = {r:.4f} AU")
-        print(f"Star mass = {star_mass:.1f} solar masses")
-        print(f" Star rad = {star_rad} AU")
+        if debug_print:
+            print(f"Slingshot {i + 1}:")
+            print(f"Desired angle = {np.degrees(angle):.1f} deg")
+            print(f"    Angle = {np.degrees(deflection_angle):.1f} deg")
+            print(f"        v = {v:.4f} km/s")
+            print(f"Periapsis = {r:.4f} AU")
+            print(f"Star mass = {star_mass:.1f} solar masses")
+            print(f" Star rad = {star_rad} AU")
 
-        print("")
+            print("")
 
         max_v = min(max_v, v)
 
         prev_pos = pos
 
     return max_v
+
+
+def star_distance(star1, star2):
+    """
+    Calculates the distance between two stars.
+    """
+
+    x_diff = star2["x"] - star1["x"]
+    y_diff = star2["y"] - star2["y"]
+    z_diff = star2["z"] - star2["z"]
+    diff = np.array([x_diff, y_diff, z_diff])
+
+    return np.sqrt(np.dot(diff, diff))
+
+
+def find_best_stop_order(selected_stops, stars_data):
+    """
+    Calculates the optimal order of stops using the Held-Karp algorithm
+    """
+
+    n = len(selected_stops)
+
+    # Build distance matrix
+    dist = [[0] * n for _ in range(n)]
+    for i in range(n):
+        for j in range(n):
+            if i != j:
+                star1 = stars_data.loc[selected_stops[i]]
+                star2 = stars_data.loc[selected_stops[j]]
+                d = star_distance(star1, star2)
+                dist[i][j] = d
+            else:
+                dist[i][j] = float("inf")
+
+    # Held-Karp DP
+    C = {}
+    for k in range(1, n):
+        C[(frozenset([k]), k)] = (dist[0][k], [0, k])
+
+    for s in range(2, n):
+        for subset in combinations(range(1, n), s):
+            S = frozenset(subset)
+            for k in subset:
+                prev_set = S - {k}
+                min_cost = float("inf")
+                best_path = []
+                for m in prev_set:
+                    cost, path = C[(prev_set, m)]
+                    new_cost = cost + dist[m][k]
+                    if new_cost < min_cost:
+                        min_cost = new_cost
+                        best_path = path + [k]
+                C[(S, k)] = (min_cost, best_path)
+
+    # Choose shortest ending path (not necessarily returning to start)
+    full_set = frozenset(range(1, n))
+    min_total = float("inf")
+    final_path = []
+    for k in range(1, n):
+        cost, path = C[(full_set, k)]
+        if cost < min_total:
+            min_total = cost
+            final_path = path
+
+    stop_order = [selected_stops[i] for i in final_path]
+
+    return stop_order
+
+
+def orientation(p, q, r):
+    """Return the orientation of the triplet (p, q, r).
+    0 -> p, q and r are collinear
+    1 -> Clockwise
+    2 -> Counterclockwise
+    """
+    val = (q[1] - p[1]) * (r[0] - q[0]) - (q[0] - p[0]) * (r[1] - q[1])
+    if val == 0:
+        return 0  # collinear
+    elif val > 0:
+        return 1  # clockwise
+    else:
+        return 2  # counterclockwise
+
+
+def on_segment(p, q, r):
+    """Check if point q lies on line segment pr."""
+    if min(p[0], r[0]) <= q[0] <= max(p[0], r[0]) and min(p[1], r[1]) <= q[1] <= max(
+        p[1], r[1]
+    ):
+        return True
+    return False
+
+
+def do_intersect(p1, q1, p2, q2):
+    """Returns True if the line segments 'p1q1' and 'p2q2' intersect."""
+    # Find the 4 orientations needed for the general and special cases
+    o1 = orientation(p1, q1, p2)
+    o2 = orientation(p1, q1, q2)
+    o3 = orientation(p2, q2, p1)
+    o4 = orientation(p2, q2, q1)
+
+    # General case
+    if o1 != o2 and o3 != o4:
+        return True
+
+    # Special cases
+    # p1, q1 and p2 are collinear and p2 lies on segment p1q1
+    if o1 == 0 and on_segment(p1, p2, q1):
+        return True
+
+    # p1, q1 and p2 are collinear and q2 lies on segment p1q1
+    if o2 == 0 and on_segment(p1, q2, q1):
+        return True
+
+    # p2, q2 and p1 are collinear and p1 lies on segment p2q2
+    if o3 == 0 and on_segment(p2, p1, q2):
+        return True
+
+    # p2, q2 and p1 are collinear and q1 lies on segment p2q2
+    if o4 == 0 and on_segment(p2, q1, q2):
+        return True
+
+    # If none of the cases apply, then the segments do not intersect
+    return False
+
+
+def check_path_intersection_2d(path, stars_data):
+    """Checks if a given path contains intersections."""
+
+    # Build list of segments
+    segments = []
+
+    for i, node in enumerate(path):
+        if i == len(path) - 1:  # Skip final node
+            break
+
+        star_data = stars_data.loc[node]
+        pos = np.array([star_data["x"], star_data["y"]])
+
+        next_star_data = stars_data.loc[path[i + 1]]
+        next_pos = np.array([next_star_data["x"], next_star_data["y"]])
+
+        if i == 0:
+            segments.append((np.array([0.0, 0.0]), pos))
+        segments.append((pos, next_pos))
+
+    # Check intersections
+    for i in range(len(segments)):
+        for j in range(len(segments)):
+            if do_intersect(
+                segments[i][0], segments[i][1], segments[j][0], segments[j][1]
+            ):
+                return True
+
+    return False
 
 
 def main():
@@ -307,18 +478,26 @@ def main():
     # Filter by distance
     stars_data = stars_data[stars_data["pc_dist"] <= PC_LIM].reset_index(drop=True)
 
-    # This is fixed for testing purposes (we can define it by TSP or similar later)
-    # path = [201, 18, 77, 166, 5]
-    path = np.random.choice(np.arange(0, len(stars_data)), size=100, replace=False)
+    stops = [126, 65, 91, 50, 43, 139, 28, 96, 52, 53]
+    path = stops  # find_best_stop_order(stops, stars_data)
+
+    # for i in range(10):
+    #     # Calculate optimal path with Held-Karp
+    #     stops = np.random.choice(np.arange(0, len(stars_data)), size=10, replace=False)
+    #
+    #
+    #
+    #     if not check_path_intersection_2d(path, stars_data):
+    #         break
+
+    print(path)
 
     max_v = calculate_slingshot_params(stars_data, path)
 
     if max_v is None:
         return
 
-    print(
-        f"\nFor the velocity {max_v:.5f} km/s we have the following impact parameters:"
-    )
+    print(f"\nFor the velocity {max_v:.5f} km/s we have the following parameters:")
     calculate_slingshot_params(stars_data, path, max_v)
 
     # Plot stars and path for visualisation
