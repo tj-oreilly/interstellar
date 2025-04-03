@@ -47,6 +47,120 @@ def read_gaia_coords(file_name):
     return stars_csv
 
 
+def plotting_function_3d(stars_data, path):
+    """
+    Plots the stars and the path that will be taken in 3D.
+    """
+
+    OFFSET = 0.5
+
+    # Create 3D plot
+    fig = plt.figure(figsize=(12, 10), facecolor="black")
+    ax = fig.add_subplot(111, projection="3d")
+    ax.set_facecolor("black")
+
+    # Set axis pane colors to black
+    ax.xaxis.pane.fill = False
+    ax.yaxis.pane.fill = False
+    ax.zaxis.pane.fill = False
+
+    # Set the grid and pane edge colors
+    ax.xaxis.pane.set_edgecolor("white")
+    ax.yaxis.pane.set_edgecolor("white")
+    ax.zaxis.pane.set_edgecolor("white")
+    ax.xaxis.pane.set_alpha(0.1)
+    ax.yaxis.pane.set_alpha(0.1)
+    ax.zaxis.pane.set_alpha(0.1)
+
+    # Scale the star radii
+    radii_scaled = 20.0 * (
+        stars_data["radius_gspphot"] / stars_data["radius_gspphot"].max()
+    )
+
+    # Create 3D scatter plot
+    scatter = ax.scatter(
+        stars_data["x"],
+        stars_data["y"],
+        stars_data["z"],  # Add z-coordinate
+        s=radii_scaled,
+        c=stars_data["teff_gspphot"],
+        cmap="plasma",
+        norm=mcolors.Normalize(
+            vmin=stars_data["teff_gspphot"].min(),
+            vmax=stars_data["teff_gspphot"].max(),
+        ),
+        alpha=0.85,
+        edgecolors="none",
+    )
+
+    # Draw probe stops in 3D
+    for i, stop in enumerate(path):
+        x = stars_data.loc[stop, "x"]
+        y = stars_data.loc[stop, "y"]
+        z = stars_data.loc[stop, "z"]  # Add z-coordinate
+        ax.scatter(x, y, z, color="green", s=40, zorder=5)
+        ax.text(
+            x + OFFSET,
+            y + OFFSET,
+            z + OFFSET,  # Add offset to z-coordinate
+            str(i + 1),
+            color="green",
+            fontsize=10,
+            weight="bold",
+        )
+
+    # Draw path line in 3D
+    coords = stars_data.loc[path]
+
+    # Create sun coordinate with z=0
+    sun_coord = pd.Series({"x": 0.0, "y": 0.0, "z": 0.0})
+    coords = pd.concat([pd.DataFrame([sun_coord]), coords], ignore_index=True)
+
+    ax.plot(
+        coords["x"],
+        coords["y"],
+        coords["z"],  # Add z-coordinate
+        color="green",
+        linestyle="-",
+        linewidth=1,
+        marker="o",
+        markersize=3,
+        label="Rocket Path",
+    )
+
+    # Plot sun
+    ax.scatter(0, 0, 0, color="red", s=80, label="Sun", zorder=5)
+
+    # Set labels for all axes
+    ax.set_xlabel("x [pc]", color="white")
+    ax.set_ylabel("y [pc]", color="white")
+    ax.set_zlabel("z [pc]", color="white")  # Add z-axis label
+    ax.set_title(f"3D Star Map (within {PC_LIM} parsecs)", color="white")
+
+    # Add legend
+    ax.legend(facecolor="black", edgecolor="white", labelcolor="white")
+
+    # Colorbar
+    cbar = plt.colorbar(scatter)
+    cbar.set_label("Temperature [K]", color="white")
+    cbar.ax.yaxis.set_tick_params(color="white")
+    plt.setp(plt.getp(cbar.ax.axes, "yticklabels"), color="white")
+
+    # Set tick colors
+    ax.tick_params(axis="x", colors="white")
+    ax.tick_params(axis="y", colors="white")
+    ax.tick_params(axis="z", colors="white")  # Add z-axis tick params
+
+    # Set grid
+    ax.grid(True, linestyle="--", alpha=0.3)
+
+    # Add some rotation to better see the 3D effect
+    ax.view_init(elev=30, azim=45)
+
+    plt.savefig("path_plot_3d.svg", format="svg")
+    plt.show()
+
+
 def plotting_function(stars_data, path):
     """
     Plots the stars and the path that will be taken between them.
@@ -501,7 +615,7 @@ def main():
     calculate_slingshot_params(stars_data, path, max_v)
 
     # Plot stars and path for visualisation
-    plotting_function(stars_data, path)
+    plotting_function_3d(stars_data, path)
 
 
 if __name__ == "__main__":
