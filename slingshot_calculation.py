@@ -52,7 +52,7 @@ def plotting_function_3d(stars_data, path):
     Plots the stars and the path that will be taken in 3D.
     """
 
-    OFFSET = 0.5
+    OFFSET = 0.8
 
     # Create 3D plot
     fig = plt.figure(figsize=(12, 10), facecolor="black")
@@ -91,6 +91,7 @@ def plotting_function_3d(stars_data, path):
         ),
         alpha=0.85,
         edgecolors="none",
+        zorder=3
     )
 
     # Draw probe stops in 3D
@@ -98,14 +99,14 @@ def plotting_function_3d(stars_data, path):
         x = stars_data.loc[stop, "x"]
         y = stars_data.loc[stop, "y"]
         z = stars_data.loc[stop, "z"]  # Add z-coordinate
-        ax.scatter(x, y, z, color="green", s=40, zorder=5)
+        ax.scatter(x, y, z, color="green", s=40)
         ax.text(
             x + OFFSET,
             y + OFFSET,
             z + OFFSET,  # Add offset to z-coordinate
             str(i + 1),
-            color="green",
-            fontsize=10,
+            color="white",
+            fontsize=12,
             weight="bold",
         )
 
@@ -120,12 +121,12 @@ def plotting_function_3d(stars_data, path):
         coords["x"],
         coords["y"],
         coords["z"],  # Add z-coordinate
-        color="green",
+        color="lime",
         linestyle="-",
         linewidth=1,
         marker="o",
         markersize=3,
-        label="Rocket Path",
+        label="Path",
     )
 
     # Plot sun
@@ -137,6 +138,9 @@ def plotting_function_3d(stars_data, path):
     ax.set_zlabel("z [pc]", color="white")  # Add z-axis label
     ax.set_title(f"3D Star Map (within {PC_LIM} parsecs)", color="white")
 
+
+    
+
     # Add legend
     ax.legend(facecolor="black", edgecolor="white", labelcolor="white")
 
@@ -145,17 +149,15 @@ def plotting_function_3d(stars_data, path):
     cbar.set_label("Temperature [K]", color="white")
     cbar.ax.yaxis.set_tick_params(color="white")
     plt.setp(plt.getp(cbar.ax.axes, "yticklabels"), color="white")
-
-    # Set tick colors
-    ax.tick_params(axis="x", colors="white")
-    ax.tick_params(axis="y", colors="white")
-    ax.tick_params(axis="z", colors="white")  # Add z-axis tick params
-
+ 
     # Set grid
     ax.grid(True, linestyle="--", alpha=0.3)
 
     # Add some rotation to better see the 3D effect
     ax.view_init(elev=30, azim=45)
+
+    # Remove grid lines but keep the axes
+    ax.grid(False)
 
     plt.savefig("path_plot_3d.svg", format="svg")
     plt.show()
@@ -235,8 +237,8 @@ def plotting_function(stars_data, path):
     cbar.set_label("Temperature [K]", color="white")
     cbar.ax.yaxis.set_tick_params(color="white")
 
-    plt.setp(plt.getp(cbar.ax.axes, "yticklabels"), color="white")
-    ax.tick_params(colors="white")
+
+
     plt.grid(True, linestyle="--", alpha=0.3)
     plt.savefig("path_plot.svg", format="svg")
     plt.show()
@@ -435,6 +437,9 @@ def star_distance(star1, star2):
     Calculates the distance between two stars.
     """
 
+    if star1 is None:
+        star1 = {"x":0.0, "y":0.0, "z":0.0}
+
     x_diff = star2["x"] - star1["x"]
     y_diff = star2["y"] - star2["y"]
     z_diff = star2["z"] - star2["z"]
@@ -613,6 +618,21 @@ def main():
 
     print(f"\nFor the velocity {max_v:.5f} km/s we have the following parameters:")
     calculate_slingshot_params(stars_data, path, max_v)
+
+    # Calculate time
+    distance = 0.0
+    for index, star_index in enumerate(path):
+        if index == len(path) - 1:
+            break
+
+        next_star_index = path[index+1]
+        star_distance(stars_data.loc[star_index], stars_data.loc[next_star_index])
+
+    distance += star_distance(None, stars_data.loc[path[0]]) # First star
+
+    print(distance)
+    time = distance / (max_v / 3.0857e+13)  # Parsec unit convert
+    print(time / (86400 * 365)) # years
 
     # Plot stars and path for visualisation
     plotting_function_3d(stars_data, path)
